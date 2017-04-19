@@ -22,13 +22,8 @@ from oauthenticator import GitHubOAuthenticator, LocalAuthenticator, \
     GitHubLoginHandler
 from tornado import gen, web
 from tornado.httputil import url_concat
-from tornado.httpclient import HTTPRequest, AsyncHTTPClient, HTTPClient
+from tornado.httpclient import HTTPRequest, AsyncHTTPClient
 
-ghowl = None
-ghowlenv = 'GITHUB_ORGANIZATION_WHITELIST'
-ghowlstr = os.environ.get(ghowlenv)
-if ghowlstr:
-    ghowl = ghowlstr.split(',')
 # *** Begin duplicated implementation ***
 # Support github.com and github enterprise installations
 GITHUB_HOST = os.environ.get('GITHUB_HOST') or 'github.com'
@@ -49,28 +44,30 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
     """This is just GitHubOAuthenticator with an environment-derived
     whitelist added.  GITHUB_ORGANIZATION_WHITELIST is taken to be a
     comma-separated list of GitHub organizations.  When
-    authenticating, we do the GitHub auth first, and then when
-    authenticated as the user, we get the list of organizations it's
-    in.  If any of those arguments are in GITHUB_ORGANIZATION_WHITELIST
-    then we return the user name; otherwise, we return None.
+    authenticating, we do the GitHub auth first.
 
+    We then stash the access token (and some other data) in the authenticator's
+    auth_context member.
+
+    That way, when we get to check_whitelist, we replace that implementation
+    with a method that looks at the value of GITHUB_ORGANIZATION_WHITELIST.
+    It uses the access token to find the GitHub organizations that the user
+    belongs to.  That list is intersected with the whitelist, and if the
+    result isn't empty, the user is authenticated; otherwise the user is
+    not permitted to log in, and the auth_context structure is cleared.
     """
 
     login_handler = GHOWLLoginHandler
+    auth_context = {}
 
     # It's a Tornado coroutine
     @gen.coroutine
-    def authenticate(self, handler, data=None):
-        """Standard GitHub OAuth, only with an org membership check.
+    def authenticate(self, handler, data=None, auth_context=None):
+        """Standard GitHub OAuth, only stashing the access token.
         """
-        self.log.info("Authenticating GHOWL.")
-        if not ghowl:
-            # Why on earth would you call this class without the org list?
-            #  Just use the (standard) GitHubOAuthenticator instead.
-            self.log.warning("No GitHub Organization WhiteList defined.")
-            return None  # NOQA
         # We are duplicating the superclass implementation because we need the
         #  access token, which is not exposed by the parent implementation.
+        #  We will also grab the GitHub ID because we want it downstream.
         self.log.info("Entering GH OAuth duplicated section")
         # *** Begin duplicated implementation ***
         code = handler.get_argument("code", False)
@@ -118,26 +115,62 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         # *** End duplicated implementation ***
         self.log.info("Exiting GH OAuth duplicated section")
         user = resp_json["login"]
-        self.log.info("Got GH user %s." % user)
-        orgurl = "https://%s/orgs" % GITHUB_API
-        self.log.info("About to request URL %s" % orgurl)
-        orgreq = HTTPRequest(orgurl,
-                             method="GET",
-                             headers=headers
-                             )
-        orghttp_client = HTTPClient()  # Synchronous: we have to get orgs
-        orgresp = orghttp_client.fetch(orgreq)
-        orgresp_json = json.loads(orgresp.body.decode('utf8', 'replace'))
-        orghttp_client.close()
-        orglist = [item["login"] for item in orgresp_json]
-        self.log.info("User %s Orgs: %s" % (user, str(orglist)))
-        intersection = [org for org in orglist if org in ghowl]
-        self.log.info("Intersected Orgs: %s" % str(intersection))
-        if not intersection:
-            # Sorry, buddy.  You're not on the list.  You're NOBODY.
-            self.log.warning("User %s is not in %r" % (user, ghowl))
-            user = None
+        if not user:
+            self.auth_context = {}
+            user = None  # Ensure it's the right kind of Not User
+        else:
+            uid = resp_json["id"]
+            self.auth_context["username"] = user
+            self.auth_context["uid"] = uid
+            self.auth_context["access_token"] = "SECRET"
+            self.log.info("Auth Context: %r" % self.auth_context)
+            self.auth_context["access_token"] = access_token
         return user  # NOQA
+
+    def check_whitelist(self, username):
+        """Use GitHub organization whitelist."""
+        ghowl = None
+        ghowlenv = 'GITHUB_ORGANIZATION_WHITELIST'
+        ghowlstr = os.environ.get(ghowlenv)
+        if ghowlstr:
+            ghowl = ghowlstr.split(',')
+        stillgood = True
+        if not ghowl:
+            self.log.warning("No GitHub Organization whitelist; can't auth")
+            self.auth_context = {}
+            stillgood = False
+        if stillgood and (not self.auth_context or "access_token" not
+                          in self.auth_context):
+            self.log.warning("No access token in authenticator: can't auth")
+            self.auth_context = {}
+            stillgood = False
+        if stillgood:
+            access_token = self.auth_context["access_token"]
+            orgurl = "https://%s/orgs" % GITHUB_API
+            self.log.info("About to request URL %s" % orgurl)
+            headers = {"Accept": "application/json",
+                       "User-Agent": "JupyterHub/%s" % username,
+                       "Authorization": "token {}".format(access_token)
+                       }
+            orgreq = HTTPRequest(orgurl,
+                                 method="GET",
+                                 headers=headers
+                                 )
+            orghttp_client = AsyncHTTPClient()
+            orgresp = yield orghttp_client.fetch(orgreq)
+            orgresp_json = json.loads(orgresp.body.decode('utf8', 'replace'))
+            orghttp_client.close()
+            orglist = [item["login"] for item in orgresp_json]
+            self.auth_context["organizations"] = orglist
+            self.log.info("User %s Orgs: %s" % (username, str(orglist)))
+            intersection = [org for org in orglist if org in ghowl]
+            self.log.info("Intersected Orgs: %s" % str(intersection))
+            if not intersection:
+                # Sorry, buddy.  You're not on the list.  You're NOBODY.
+                self.log.warning("User %s is not in %r" % (username, ghowl))
+                self.auth_context = {}  # Forget access token and friends
+                stillgood = False
+        return stillgood  # NOQA
 
 
 class LocalGHOWLAuthenticator(LocalAuthenticator, GHOWLAuthenticator):
