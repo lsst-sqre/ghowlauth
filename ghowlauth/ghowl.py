@@ -36,8 +36,11 @@ else:
 
 class GHOWLLoginHandler(GitHubLoginHandler):
     """Must be able to get organization membership.
+
+    We're going to cheat and get repo too, so that we can pass the token
+    to the backend and set up the user to pull/push automagically.
     """
-    scope = ["read:org"]
+    scope = ["read:org", "repo"]
 
 
 class GHOWLAuthenticator(GitHubOAuthenticator):
