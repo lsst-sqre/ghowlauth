@@ -171,6 +171,7 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
             self.log.warning("User %s is not in %r" % (user, ghowls))
             self.auth_context = {}  # Forget auxilary data
             return None  # NoQA
+        self.auth_context["access_token"] = "[secret]"
         self.log.info("Auth context: %s" % json.dumps(self.auth_context,
                                                       indent=4,
                                                       sort_keys=True))
