@@ -18,8 +18,7 @@
 import json
 import os
 
-from oauthenticator import GitHubOAuthenticator, LocalAuthenticator, \
-    GitHubLoginHandler
+from oauthenticator import GitHubOAuthenticator, GitHubLoginHandler
 from tornado import gen, web
 from tornado.httputil import url_concat
 from tornado.httpclient import HTTPRequest, AsyncHTTPClient
@@ -136,13 +135,14 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         self.log.info("Exiting GH OAuth duplicated section")
         user = resp_json["login"]
         if not user:
-            self.auth_context = {}
             return None  # NoQA
-        self.auth_context["username"] = user
-        self.auth_context["uid"] = resp_json["id"]
-        self.auth_context["name"] = resp_json["name"]
+        self.auth_context[user] = {}
+        acu = self.auth_context[user]
+        acu["username"] = user
+        acu["uid"] = resp_json["id"]
+        acu["name"] = resp_json["name"]
         if "email" in resp_json:
-            self.auth_context["email"] = resp_json["email"]
+            acu["email"] = resp_json["email"]
         # I don't know why check_whitelist is never being called, but...
         #  ...fine, we can do it in authenticate()
         orgurl = "https://%s/orgs" % GITHUB_API
@@ -165,16 +165,16 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         intersection = [org for org in orglist if org in ghowls]
         self.log.info("Intersected Orgs: %s" % str(intersection))
         if intersection:
-            self.auth_context["orgmap"] = orgmap
+            acu["orgmap"] = orgmap
         else:
             # Sorry, buddy.  You're not on the list.  You're NOBODY.
             self.log.warning("User %s is not in %r" % (user, ghowls))
-            self.auth_context = {}  # Forget auxilary data
+            acu = {}  # Forget auxilary data
             return None  # NoQA
-        self.auth_context["access_token"] = "[secret]"
-        self.log.info("Auth context: %s" % json.dumps(self.auth_context,
+        acu["access_token"] = "[secret]"
+        self.log.info("Auth context: %s" % json.dumps(acu,
                                                       indent=4,
                                                       sort_keys=True))
         # This seems a little fishy.
-        self.auth_context["access_token"] = access_token
+        acu["access_token"] = access_token
         return user  # NoQA
