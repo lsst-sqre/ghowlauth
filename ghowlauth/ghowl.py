@@ -17,6 +17,7 @@
 
 import json
 import os
+import string
 
 from oauthenticator import GitHubOAuthenticator, GitHubLoginHandler
 from tornado import gen, web
@@ -80,7 +81,6 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         ghowlstr = os.environ.get(ghowlenv)
         if ghowlstr:
             ghowls = ghowlstr.split(',')
-        stillgood = True
         if not ghowls:
             self.log.warning("No GitHub Organization whitelist; can't auth")
             return None  # NoQA
@@ -136,9 +136,13 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         user = resp_json["login"]
         if not user:
             return None  # NoQA
-        self.auth_context[user] = {}
-        acu = self.auth_context[user]
+        safe_chars = set(string.ascii_lowercase + string.digits)
+        safe_username = ''.join(
+            [s if s in safe_chars else '-' for s in user.lower()])
+        self.auth_context[safe_username] = {}
+        acu = self.auth_context[safe_username]
         acu["username"] = user
+        acu["canonicalname"] = safe_username
         acu["uid"] = resp_json["id"]
         acu["name"] = resp_json["name"]
         if "email" in resp_json:
