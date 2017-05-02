@@ -37,14 +37,20 @@ else:
 class GHOWLLoginHandler(GitHubLoginHandler):
     """Must be able to get organization membership, hence read:org.
 
-    We're going to cheat and get repo too, so that we can pass the token
-    to the backend and set up the user to pull/push automagically.
+    We're going to cheat and get public_repo too, so that we can pass
+    the token to the backend and set up the user to pull/push
+    automagically.  (We are implicitly presuming that the repositories we
+    care about for the LSST use case will be public, or at least that if
+    someone cares a lot about using this with a private repo, entering
+    credentials by hand doesn't seem like a big deal.)
 
-    User:email lets us get an email address for the user, also used for
-    .gitconfig creation on the backend.  If the primary email address is
-    private, it's still going to come back empty.
+    User:email lets us get an email address for the user, also used
+    for .gitconfig creation on the backend.  If the primary email
+    address is private, it's still going to come back empty, so it's
+    not really all that useful.
+
     """
-    scope = ["read:org", "repo", "user:email"]
+    scope = ["read:org", "public_repo", "user:email"]
 
 
 class GHOWLAuthenticator(GitHubOAuthenticator):
