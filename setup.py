@@ -7,9 +7,9 @@ from setuptools import setup, find_packages
 PACKAGENAME = 'sqre-ghowlauth'
 DESCRIPTION = 'JupyterHub authenticator that uses GH orgs as whitelists'
 AUTHOR = 'Adam Thornton'
-AUTHOR_EMAIL = 'frossie@lsst.org'
+AUTHOR_EMAIL = 'athornton@lsst.org'
 URL = 'https://github.com/lsst-sqre/ghowlauth'
-VERSION = '0.0.9'
+VERSION = '0.10.0'
 LICENSE = 'MIT'
 
 
