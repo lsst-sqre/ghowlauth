@@ -20,17 +20,25 @@ import os
 import string
 
 from oauthenticator import GitHubOAuthenticator, GitHubLoginHandler
-from tornado import gen, web
+from tornado import gen
 from tornado.httputil import url_concat
 from tornado.httpclient import HTTPRequest, AsyncHTTPClient
+from .common import next_page_from_links
 
 # *** Begin duplicated implementation ***
 # Support github.com and github enterprise installations
 GITHUB_HOST = os.environ.get('GITHUB_HOST') or 'github.com'
 if GITHUB_HOST == 'github.com':
-    GITHUB_API = 'api.github.com/user'
+    GITHUB_API = 'api.github.com'
 else:
-    GITHUB_API = '%s/api/v3/user' % GITHUB_HOST
+    GITHUB_API = '%s/api/v3' % GITHUB_HOST
+
+
+def _api_headers(access_token):
+    return {"Accept": "application/vnd.github.v3+json",
+            "User-Agent": "JupyterHub",
+            "Authorization": "token {}".format(access_token)
+            }
 # *** End duplicated implementation ***
 
 
@@ -72,6 +80,7 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
 
     login_handler = GHOWLLoginHandler
     auth_context = {}
+    github_organization_whitelist = None
 
     # It's a Tornado coroutine
     @gen.coroutine
@@ -82,22 +91,23 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
         After that, it's standard GitHub OAuth, except that we stash a bunch
         of data to pass to user creation.
         """
-        ghowls = None
-        ghowlenv = 'GITHUB_ORGANIZATION_WHITELIST'
-        ghowlstr = os.environ.get(ghowlenv)
-        if ghowlstr:
-            ghowls = ghowlstr.split(',')
-        if not ghowls:
-            self.log.warning("No GitHub Organization whitelist; can't auth")
-            return None  # NoQA
+        if not self.github_organization_whitelist:
+            ghowls = None
+            ghowlenv = 'GITHUB_ORGANIZATION_WHITELIST'
+            autherr = "No GitHub Organization Whitelist: cannot auth"
+            ghowlstr = os.environ.get(ghowlenv)
+            if ghowlstr:
+                ghowls = ghowlstr.split(',')
+            if not ghowls:
+                self.log.warning(autherr)
+                return None  # NoQA
+            self.github_organization_whitelist = ghowls
         # We are duplicating the superclass implementation because we need the
         #  access token, which is not exposed by the parent implementation.
         #  We will also grab the GitHub ID because we want it downstream.
         self.log.info("Entering GH OAuth duplicated section")
         # *** Begin duplicated implementation ***
-        code = handler.get_argument("code", False)
-        if not code:
-            raise web.HTTPError(400, "oauth callback made without a token")
+        code = handler.get_argument("code")
         # TODO: Configure the curl_httpclient for tornado
         http_client = AsyncHTTPClient()
 
@@ -123,68 +133,70 @@ class GHOWLAuthenticator(GitHubOAuthenticator):
 
         resp = yield http_client.fetch(req)
         resp_json = json.loads(resp.body.decode('utf8', 'replace'))
-
         access_token = resp_json['access_token']
 
         # Determine who the logged in user is
-        headers = {"Accept": "application/json",
-                   "User-Agent": "JupyterHub",
-                   "Authorization": "token {}".format(access_token)
-                   }
-        req = HTTPRequest("https://%s" % GITHUB_API,
+        url = "https://%s/user" % GITHUB_API
+        headers = _api_headers(access_token)
+        req = HTTPRequest(url,
                           method="GET",
                           headers=headers
                           )
         resp = yield http_client.fetch(req)
         resp_json = json.loads(resp.body.decode('utf8', 'replace'))
+        self.log.info("GH User Response: %s", json.dumps(
+            resp_json, sort_keys=True, indent=4))
+
+        username = resp_json["login"]
+
+        # Check if user is a member of any whitelisted organizations.
+        # This check is performed here, as it requires `access_token`.
+        # *** Modified implementation
+        if self.github_organization_whitelist and username:
+            for org in self.github_organization_whitelist:
+                user_in_org = yield self._check_organization_whitelist(org, username, access_token)
+                if not user_in_org:
+                    return None
+        else:  # no organization whitelisting
+            return username
+
         # *** End duplicated implementation ***
         self.log.info("Exiting GH OAuth duplicated section")
-        user = resp_json["login"]
-        if not user:
+        if not username:
             return None  # NoQA
         safe_chars = set(string.ascii_lowercase + string.digits)
         safe_username = ''.join(
-            [s if s in safe_chars else '-' for s in user.lower()])
+            [s if s in safe_chars else '-' for s in username.lower()])
         self.auth_context[safe_username] = {}
         acu = self.auth_context[safe_username]
-        acu["username"] = user
+        acu["username"] = username
         acu["canonicalname"] = safe_username
         acu["uid"] = resp_json["id"]
         acu["name"] = resp_json["name"]
-        if "email" in resp_json:
+        if "email" in resp_json and resp_json["email"]:
             acu["email"] = resp_json["email"]
-        # I don't know why check_whitelist is never being called, but...
-        #  ...fine, we can do it in authenticate()
-        orgurl = "https://%s/orgs" % GITHUB_API
-        self.log.info("About to request URL %s for GH orgs" % orgurl)
-        headers = {"Accept": "application/json",
-                   "User-Agent": "JupyterHub/%s" % user,
-                   "Authorization": "token {}".format(access_token)
-                   }
-        orgreq = HTTPRequest(orgurl,
-                             method="GET",
-                             headers=headers
-                             )
-        orghttp_client = AsyncHTTPClient()
-        orgresp = yield orghttp_client.fetch(orgreq)
-        orgresp_json = json.loads(orgresp.body.decode('utf8', 'replace'))
-        orghttp_client.close()
-        orglist = [item["login"] for item in orgresp_json]
-        orgmap = [(item["login"], item["id"]) for item in orgresp_json]
-        self.log.info("User %s Orgs: %s" % (user, str(orglist)))
-        intersection = [org for org in orglist if org in ghowls]
-        self.log.info("Intersected Orgs: %s" % str(intersection))
-        if intersection:
-            acu["orgmap"] = orgmap
-        else:
-            # Sorry, buddy.  You're not on the list.  You're NOBODY.
-            self.log.warning("User %s is not in %r" % (user, ghowls))
-            acu = {}  # Forget auxilary data
-            return None  # NoQA
         acu["access_token"] = "[secret]"
-        self.log.info("Auth context: %s" % json.dumps(acu,
-                                                      indent=4,
-                                                      sort_keys=True))
+        self.log.info("Auth context [%s]: %s" % (username,
+                                                 json.dumps(acu,
+                                                            indent=4,
+                                                            sort_keys=True)))
         # This seems a little fishy.
         acu["access_token"] = access_token
-        return user  # NoQA
+        return username  # NoQA
+
+    @gen.coroutine
+    def _check_organization_whitelist(self, org, username, access_token):
+        http_client = AsyncHTTPClient()
+        headers = _api_headers(access_token)
+        # Get all the members for organization 'org'
+        next_page = "https://%s/orgs/%s/members" % (GITHUB_API, org)
+        while next_page:
+            req = HTTPRequest(next_page, method="GET", headers=headers)
+            resp = yield http_client.fetch(req)
+            resp_json = json.loads(resp.body.decode('utf8', 'replace'))
+            next_page = next_page_from_links(resp)
+            org_members = set(entry["login"] for entry in resp_json)
+            # check if any of the organizations seen thus far are in whitelist
+            if username in org_members:
+                return True  # NoQA
+        return False
